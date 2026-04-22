@@ -41,8 +41,8 @@ jobs:
             git push
           fi
 
-      - name: Upload debug page on failure
-        if: failure() || hashFiles('last_page.html') != ''
+      - name: Upload debug page
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: debug-page

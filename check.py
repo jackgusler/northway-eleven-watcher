@@ -4,9 +4,6 @@ Northway Eleven B4 floor plan availability watcher.
 Loads the floorplan-availability page in a headless browser, finds the B4
 section, extracts every listed unit, and compares against the last run's state.
 If any new unit appears, pushes a notification to ntfy.sh.
-
-Runs in GitHub Actions on a cron. State persists by being committed back to
-the repo between runs.
 """
 
 import json
@@ -21,68 +18,84 @@ from playwright.sync_api import sync_playwright
 URL = "https://www.eaglerockproperties.com/apartments/ny/ballston-lake/northway-eleven/floorplan-availability"
 FLOORPLAN = "B4"
 STATE_FILE = Path("state.json")
-DEBUG_HTML = Path("last_page.html")  # dumped on error for debugging
+DEBUG_HTML = Path("last_page.html")
 
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 NTFY_SERVER = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
 
 
+def log(msg: str) -> None:
+    """Print to stdout with a marker so logs are easy to scan in CI."""
+    print(f"[watcher] {msg}", flush=True)
+
+
 def extract_b4_units(page) -> list[dict]:
-    """
-    Return a list of dicts, one per B4 unit currently listed. Each dict has
-    at minimum an 'apt' key (the unique unit identifier) plus whatever other
-    fields we can pull (available date, price, beds/baths, sqft).
-
-    The Eagle Rock site is built on a G5/Rent Manager widget that renders a
-    card or table per floor plan with expandable unit rows. We locate the B4
-    section by its visible label, then scrape everything beneath it.
-    """
-    # Give the JS widget time to populate. The site lazy-loads units.
     page.wait_for_load_state("networkidle", timeout=30_000)
+    log(f"Page loaded. Title: {page.title()!r}")
 
-    # Try a few strategies for locating the B4 block, most specific first.
-    # Strategy 1: look for a heading/button containing exactly "B4".
+    # Always dump the rendered page so we can iterate on selectors regardless
+    # of whether this run finds anything.
+    DEBUG_HTML.write_text(page.content())
+    log(f"Wrote rendered HTML ({DEBUG_HTML.stat().st_size} bytes) to {DEBUG_HTML}")
+
+    # Quick sanity check: does "B4" appear anywhere in the rendered DOM?
+    b4_text_count = page.locator("text=B4").count()
+    log(f"Elements containing the text 'B4': {b4_text_count}")
+
+    # Show the first few matches so we can see what surrounds them.
+    for i in range(min(b4_text_count, 5)):
+        try:
+            el = page.locator("text=B4").nth(i)
+            tag = el.evaluate("e => e.tagName")
+            txt = (el.inner_text() or "").strip().replace("\n", " | ")[:200]
+            log(f"  match #{i}: <{tag}> {txt!r}")
+        except Exception as e:
+            log(f"  match #{i}: error inspecting -> {e}")
+
+    # Strategy 1: exact "B4" label
     b4_locator = page.locator(
         "xpath=//*[self::h2 or self::h3 or self::h4 or self::button or "
-        "self::div or self::span][normalize-space(text())='B4']"
+        "self::div or self::span or self::a][normalize-space(text())='B4']"
     ).first
 
     if b4_locator.count() == 0:
-        # Strategy 2: any element whose text starts with "B4 " (e.g. "B4 - 2 Bed")
+        log("Strategy 1 (exact 'B4' text) found nothing. Trying strategy 2.")
         b4_locator = page.locator("text=/^B4\\b/").first
 
     if b4_locator.count() == 0:
-        print("Could not find B4 section on page.", file=sys.stderr)
-        DEBUG_HTML.write_text(page.content())
+        log("Strategy 2 (regex starts-with 'B4') found nothing either.")
+        log("Could not find B4 section on page. Bailing out.")
         return []
 
-    # Some widgets collapse units until you click the floor plan. Try clicking
-    # the B4 header in case units are hidden. Ignore failures (it may not be
-    # clickable / may already be expanded).
+    log(f"Found B4 anchor element. Tag={b4_locator.evaluate('e => e.tagName')}")
+
+    # Try clicking in case units are hidden behind a collapse/accordion.
     try:
         b4_locator.click(timeout=2_000)
         page.wait_for_timeout(1_000)
-    except Exception:
-        pass
+        log("Clicked B4 anchor (in case it was a collapsed accordion).")
+    except Exception as e:
+        log(f"B4 anchor not clickable (probably already expanded): {e}")
 
-    # Grab the containing section: walk up a few ancestors and take the one
-    # that includes unit-looking content (apartment number + date).
+    # Re-dump after clicking, since the DOM may have expanded.
+    DEBUG_HTML.write_text(page.content())
+
+    # Walk up to a container that mentions "available" so we capture the unit list.
     container = b4_locator.locator(
-        "xpath=ancestor::*[.//text()[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', "
-        "'abcdefghijklmnopqrstuvwxyz'), 'available')]][1]"
+        "xpath=ancestor::*[.//text()[contains(translate(., "
+        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), "
+        "'available')]][1]"
     ).first
 
     if container.count() == 0:
-        # Fall back to the nearest sizable ancestor
+        log("No ancestor of B4 contained 'available'. Falling back to 5-up ancestor.")
         container = b4_locator.locator("xpath=ancestor::*[5]").first
 
     text = container.inner_text() if container.count() else ""
+    log(f"Container text length: {len(text)}")
+    log(f"Container text preview:\n---\n{text[:1500]}\n---")
 
-    units = []
-    # Units on Rent Manager widgets typically look like:
-    #   "Apt 123-4   Available 07/15/2026   $2,150"
-    # or a table row with those fields. Match loosely: an apt-number-ish token
-    # followed anywhere by a date.
+    # Match unit rows. Look for an apt-id-ish token on the same line as a date.
     pattern = re.compile(
         r"(?P<apt>(?:Apt\.?\s*|Unit\s*|#)?[A-Z0-9][A-Z0-9\-]{1,10})"
         r"[^\n]*?"
@@ -92,30 +105,22 @@ def extract_b4_units(page) -> list[dict]:
         re.IGNORECASE,
     )
 
+    units = []
     seen = set()
     for m in pattern.finditer(text):
         apt = m.group("apt").strip()
-        # Filter out garbage matches (e.g. the string "B4" itself, or dates-only)
         if apt.upper() in {"B4", "APT", "UNIT"} or len(apt) < 2:
             continue
         if apt in seen:
             continue
         seen.add(apt)
-        units.append(
-            {
-                "apt": apt,
-                "available": m.group("date"),
-                "price": m.group("price") or "",
-            }
-        )
+        units.append({
+            "apt": apt,
+            "available": m.group("date"),
+            "price": m.group("price") or "",
+        })
 
-    # Always dump the raw text when we find nothing, so we can iterate on
-    # selectors without guessing.
-    if not units:
-        DEBUG_HTML.write_text(page.content())
-        print(f"B4 section found but no units parsed. Raw text:\n{text[:2000]}",
-              file=sys.stderr)
-
+    log(f"Parsed {len(units)} unit(s) from container text.")
     return units
 
 
@@ -134,7 +139,7 @@ def save_current(units: list[dict]) -> None:
 
 def notify(new_units: list[dict]) -> None:
     if not NTFY_TOPIC:
-        print("NTFY_TOPIC not set; skipping notification.", file=sys.stderr)
+        log("NTFY_TOPIC not set; skipping notification.")
         return
 
     lines = [f"{u['apt']} — available {u['available']} {u['price']}".strip()
@@ -153,7 +158,7 @@ def notify(new_units: list[dict]) -> None:
         timeout=15,
     )
     resp.raise_for_status()
-    print(f"Sent ntfy notification to {NTFY_TOPIC}")
+    log(f"Sent ntfy notification (topic redacted)")
 
 
 def main() -> int:
@@ -167,21 +172,22 @@ def main() -> int:
             viewport={"width": 1400, "height": 1000},
         )
         page = context.new_page()
+        log(f"Navigating to {URL}")
         page.goto(URL, timeout=45_000)
         units = extract_b4_units(page)
         browser.close()
 
-    print(f"Found {len(units)} B4 unit(s): {units}")
+    log(f"Final unit list: {units}")
 
     previous = load_previous()
     previous_apts = {u["apt"] for u in previous}
     new_units = [u for u in units if u["apt"] not in previous_apts]
 
     if new_units:
-        print(f"NEW: {new_units}")
+        log(f"NEW units detected: {new_units}")
         notify(new_units)
     else:
-        print("No new units since last check.")
+        log("No new units since last check.")
 
     save_current(units)
     return 0
