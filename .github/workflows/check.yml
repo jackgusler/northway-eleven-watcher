@@ -1,0 +1,50 @@
+name: Check B4 availability
+
+on:
+  schedule:
+    # Every 15 minutes. Note: GitHub Actions cron is often delayed 5-15 min
+    # under load; this is fine for apartment hunting.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:  # lets you trigger manually from the Actions tab
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to commit state.json back to the repo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          pip install playwright requests
+          python -m playwright install --with-deps chromium
+
+      - name: Run check
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python check.py
+
+      - name: Commit state if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if ! git diff --quiet state.json 2>/dev/null; then
+            git add state.json
+            git commit -m "Update B4 state [skip ci]"
+            git push
+          fi
+
+      - name: Upload debug page on failure
+        if: failure() || hashFiles('last_page.html') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-page
+          path: last_page.html
+          if-no-files-found: ignore
