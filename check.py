@@ -49,15 +49,17 @@ def get_token() -> str:
         timeout=15,
     )
     r.raise_for_status()
-    # Response is usually {"token": "eyJ..."} or just the raw token string.
+    # Response is usually {"token": "eyJ..."} or just the raw token string,
+    # or a one-element JSON array containing the token.
     try:
         data = r.json()
         if isinstance(data, dict):
             for key in ("token", "Token", "jwt", "access_token"):
                 if key in data:
                     return data[key]
-            # If dict but unknown shape, dump for inspection.
             raise RuntimeError(f"Unexpected auth response shape: {list(data)}")
+        if isinstance(data, list) and data and isinstance(data[0], str):
+            return data[0]
         if isinstance(data, str):
             return data
     except ValueError:
