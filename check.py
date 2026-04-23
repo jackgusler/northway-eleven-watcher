@@ -8,7 +8,9 @@ and pulls unit data from /api/unit. We replicate that:
   1. POST /api/authenticate (Basic auth: fpaw:ndoklnes) -> JWT
   2. GET  /api/unit (Bearer JWT) -> list of all units for property 7086
   3. Filter for FloorplanName == "B4"
-  4. Diff against last run, ntfy on new units.
+  4. Diff against last run:
+       - new units  -> high-priority ntfy ("grab it")
+       - gone units -> default-priority ntfy ("someone else got one")
 """
 
 import base64
@@ -49,8 +51,6 @@ def get_token() -> str:
         timeout=15,
     )
     r.raise_for_status()
-    # Response is usually {"token": "eyJ..."} or just the raw token string,
-    # or a one-element JSON array containing the token.
     try:
         data = r.json()
         if isinstance(data, dict):
@@ -63,7 +63,6 @@ def get_token() -> str:
         if isinstance(data, str):
             return data
     except ValueError:
-        # Not JSON — treat the body as the raw token.
         return r.text.strip().strip('"')
     raise RuntimeError(f"Could not parse auth response: {r.text[:200]}")
 
@@ -84,10 +83,9 @@ def fetch_units(token: str) -> list[dict]:
 
 
 def normalize(api_unit: dict) -> dict:
-    """Pull just the fields we care about."""
     avail = api_unit.get("AvailableDate", "")
     if "T" in avail:
-        avail = avail.split("T", 1)[0]  # 2026-07-07T00:00:00 -> 2026-07-07
+        avail = avail.split("T", 1)[0]
     return {
         "apt": api_unit["Name"],
         "available": avail,
@@ -113,29 +111,53 @@ def save_current(units: list[dict]) -> None:
     STATE_FILE.write_text(json.dumps({"units": units}, indent=2) + "\n")
 
 
-def notify(new_units: list[dict]) -> None:
+def _post_ntfy(title: str, body: str, priority: str, tags: str) -> None:
     if not NTFY_TOPIC:
-        log("NTFY_TOPIC not set; skipping notification.")
+        log(f"NTFY_TOPIC not set; skipping notification ({title!r}).")
         return
-    lines = [
-        f"{u['apt']} — Floor {u['floor']} — avail {u['available']} — "
-        f"${u['price']:.0f}"
-        for u in new_units
-    ]
-    body = "\n".join(lines)
     resp = requests.post(
         f"{NTFY_SERVER}/{NTFY_TOPIC}",
         data=body.encode("utf-8"),
         headers={
-            "Title": f"Northway Eleven B4: {len(new_units)} new unit(s)",
-            "Priority": "high",
-            "Tags": "house,bell",
+            "Title": title,
+            "Priority": priority,
+            "Tags": tags,
             "Click": PROPERTY_URL,
         },
         timeout=15,
     )
     resp.raise_for_status()
-    log("Sent ntfy notification.")
+    log(f"Sent ntfy notification: {title}")
+
+
+def notify_new(new_units: list[dict]) -> None:
+    lines = [
+        f"{u['apt']} — Floor {u['floor']} — avail {u['available']} — "
+        f"${u['price']:.0f}"
+        for u in new_units
+    ]
+    _post_ntfy(
+        title=f"Northway Eleven B4: {len(new_units)} new unit(s)",
+        body="\n".join(lines),
+        priority="high",
+        tags="house,bell",
+    )
+
+
+def notify_gone(gone_units: list[dict]) -> None:
+    """Someone probably signed a lease — a B4 we were tracking disappeared
+    from the API response."""
+    lines = [
+        f"{u['apt']} — was Floor {u['floor']} — "
+        f"was avail {u['available']} — was ${u['price']:.0f}"
+        for u in gone_units
+    ]
+    _post_ntfy(
+        title=f"Northway Eleven B4: {len(gone_units)} unit(s) no longer listed",
+        body="\n".join(lines),
+        priority="default",
+        tags="warning",
+    )
 
 
 def main() -> int:
@@ -151,14 +173,23 @@ def main() -> int:
     log(f"{len(b4_units)} are {FLOORPLAN}: {[u['apt'] for u in b4_units]}")
 
     previous = load_previous()
-    previous_apts = {u["apt"] for u in previous}
-    new_units = [u for u in b4_units if u["apt"] not in previous_apts]
+    previous_by_apt = {u["apt"]: u for u in previous}
+    current_by_apt = {u["apt"]: u for u in b4_units}
+
+    new_apts = set(current_by_apt) - set(previous_by_apt)
+    gone_apts = set(previous_by_apt) - set(current_by_apt)
+
+    new_units = [current_by_apt[a] for a in sorted(new_apts)]
+    gone_units = [previous_by_apt[a] for a in sorted(gone_apts)]
 
     if new_units:
         log(f"NEW units detected: {[u['apt'] for u in new_units]}")
-        notify(new_units)
-    else:
-        log("No new units since last check.")
+        notify_new(new_units)
+    if gone_units:
+        log(f"GONE units detected: {[u['apt'] for u in gone_units]}")
+        notify_gone(gone_units)
+    if not new_units and not gone_units:
+        log("No changes since last check.")
 
     save_current(b4_units)
     return 0
