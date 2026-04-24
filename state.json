@@ -9,16 +9,6 @@
       "bed": 2.0,
       "bath": 1.5,
       "floorplan": "B4"
-    },
-    {
-      "apt": "Nway-3BSCOTT",
-      "available": "2026-07-07",
-      "price": 1975.0,
-      "floor": "1",
-      "sqft": 1389,
-      "bed": 2.0,
-      "bath": 1.5,
-      "floorplan": "B4"
     }
   ]
 }
