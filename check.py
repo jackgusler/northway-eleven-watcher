@@ -179,6 +179,23 @@ def notify_gone(gone_units: list[dict]) -> None:
     )
 
 
+def notify_updated(changes: list[str]) -> None:
+    """A unit we already knew about had a field change (e.g. available date)."""
+    _post_ntfy(
+        title=f"Northway Eleven B4: {len(changes)} unit(s) updated",
+        body="\n".join(changes),
+        priority="default",
+        tags="pencil",
+    )
+
+
+WATCHED_FIELDS = {
+    "available": "avail date",
+    "price": "price",
+    "floor": "floor",
+}
+
+
 def main() -> int:
     log("Fetching auth token...")
     token = get_token()
@@ -197,9 +214,24 @@ def main() -> int:
 
     new_apts = set(current_by_apt) - set(previous_by_apt)
     gone_apts = set(previous_by_apt) - set(current_by_apt)
+    shared_apts = set(current_by_apt) & set(previous_by_apt)
 
     new_units = [current_by_apt[a] for a in sorted(new_apts)]
     gone_units = [previous_by_apt[a] for a in sorted(gone_apts)]
+
+    # Detect field-level changes on units that exist in both old and new state.
+    update_lines: list[str] = []
+    for apt in sorted(shared_apts):
+        old = previous_by_apt[apt]
+        new = current_by_apt[apt]
+        diffs = []
+        for field, label in WATCHED_FIELDS.items():
+            oval, nval = old.get(field), new.get(field)
+            if oval != nval:
+                diffs.append(f"{label}: {oval} → {nval}")
+        if diffs:
+            update_lines.append(f"{apt}: {', '.join(diffs)}")
+            log(f"UPDATED {apt}: {', '.join(diffs)}")
 
     if new_units:
         log(f"NEW units detected: {[u['apt'] for u in new_units]}")
@@ -207,7 +239,9 @@ def main() -> int:
     if gone_units:
         log(f"GONE units detected: {[u['apt'] for u in gone_units]}")
         notify_gone(gone_units)
-    if not new_units and not gone_units:
+    if update_lines:
+        notify_updated(update_lines)
+    if not new_units and not gone_units and not update_lines:
         log("No changes since last check.")
 
     save_current(b4_units)
