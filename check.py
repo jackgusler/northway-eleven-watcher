@@ -24,7 +24,7 @@ import requests
 API_BASE = "https://presentation.spherexx.app/api"
 # Public credentials baked into the widget's JS. Same value the website uses.
 BASIC_AUTH = base64.b64encode(b"fpaw:ndoklnes").decode("ascii")
-FLOORPLAN = "B4"
+FLOORPLANS = {"B4", "B3"}
 PROPERTY_URL = (
     "https://www.eaglerockproperties.com/apartments/ny/ballston-lake/"
     "northway-eleven/floorplan-availability"
@@ -156,7 +156,7 @@ def notify_new(new_units: list[dict]) -> None:
         for u in new_units
     ]
     _post_ntfy(
-        title=f"Northway Eleven B4: {len(new_units)} new unit(s)",
+        title=f"Northway Eleven B4/B3: {len(new_units)} new unit(s)",
         body="\n".join(lines),
         priority="high",
         tags="house,bell",
@@ -172,7 +172,7 @@ def notify_gone(gone_units: list[dict]) -> None:
         for u in gone_units
     ]
     _post_ntfy(
-        title=f"Northway Eleven B4: {len(gone_units)} unit(s) no longer listed",
+        title=f"Northway Eleven B4/B3: {len(gone_units)} unit(s) no longer listed",
         body="\n".join(lines),
         priority="default",
         tags="warning",
@@ -182,7 +182,7 @@ def notify_gone(gone_units: list[dict]) -> None:
 def notify_updated(changes: list[str]) -> None:
     """A unit we already knew about had a field change (e.g. available date)."""
     _post_ntfy(
-        title=f"Northway Eleven B4: {len(changes)} unit(s) updated",
+        title=f"Northway Eleven B4/B3: {len(changes)} unit(s) updated",
         body="\n".join(changes),
         priority="default",
         tags="pencil",
@@ -204,9 +204,9 @@ def main() -> int:
     log("Fetching units...")
     raw = fetch_units(token)
     log(f"API returned {len(raw)} total unit(s).")
-
-    b4_units = [normalize(u) for u in raw if u.get("FloorplanName") == FLOORPLAN]
-    log(f"{len(b4_units)} are {FLOORPLAN}: {[u['apt'] for u in b4_units]}")
+    
+    b4_units = [normalize(u) for u in raw if u.get("FloorplanName") in FLOORPLANS]
+    log(f"{len(b4_units)} are {FLOORPLANS}: {[u['apt'] for u in b4_units]}")
 
     previous = load_previous()
     previous_by_apt = {u["apt"]: u for u in previous}
