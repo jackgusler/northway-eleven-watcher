@@ -1,3 +1,14 @@
 {
-  "units": []
+  "units": [
+    {
+      "apt": "Nway-5BCINN",
+      "available": "2026-06-27",
+      "price": 1975.0,
+      "floor": "1",
+      "sqft": 1389,
+      "bed": 2.0,
+      "bath": 1.5,
+      "floorplan": "B4"
+    }
+  ]
 }
