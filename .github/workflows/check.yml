@@ -1,9 +1,12 @@
 name: Check B4 availability
 
-on:
-  schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch:
+# Apartment found, and locked in as ours!
+# thanks to this app lol
+
+#on:
+#  schedule:
+#    - cron: "*/15 * * * *"
+#  workflow_dispatch:
 
 jobs:
   check:
